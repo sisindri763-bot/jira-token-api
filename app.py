@@ -1,92 +1,82 @@
-# from flask import Flask, jsonify
-# import requests
-# import os
-# import time
-# from jira import JIRA_REFRESH_TOKEN
-# from dotenv import load_dotenv
-
-# load_dotenv()
-
-# app = Flask(__name__)
-
-# CLIENT_ID = os.getenv("JIRA_CLIENT_ID")
-# CLIENT_SECRET = os.getenv("JIRA_CLIENT_SECRET")
-# # REFRESH_TOKEN = os.getenv("JIRA_REFRESH_TOKEN")
-# REFRESH_TOKEN=JIRA_REFRESH_TOKEN
-# TOKEN_URL = "https://auth.atlassian.com/oauth/token"
-
-# ACCESS_TOKEN = None
-# TOKEN_EXPIRY = 0
-
-
-# @app.route("/")
-# def home():
-#     return "Jira Token API running"
-
-
-# @app.route("/generate-token")
-# def generate_token():
-
-#     global ACCESS_TOKEN
-#     global TOKEN_EXPIRY
-#     global REFRESH_TOKEN
-
-#     # if token still valid return cached token
-#     if ACCESS_TOKEN and time.time() < TOKEN_EXPIRY:
-#         return jsonify({"access_token": ACCESS_TOKEN})
-
-#     payload = {
-#         "grant_type": "refresh_token",
-#         "client_id": CLIENT_ID,
-#         "client_secret": CLIENT_SECRET,
-#         "refresh_token": REFRESH_TOKEN
-#     }
-
-#     headers = {
-#         "Content-Type": "application/json"
-#     }
-
-#     response = requests.post(TOKEN_URL, json=payload, headers=headers)
-
-#     data = response.json()
-
-#     ACCESS_TOKEN = data.get("access_token")
-#     REFRESH_TOKEN = data.get("refresh_token", REFRESH_TOKEN)
-
-#     # token expires in ~1 hour
-#     TOKEN_EXPIRY = time.time() + 3500
-
-#     return jsonify({
-#         "access_token": ACCESS_TOKEN
-#     })
-
-
-# if __name__ == "__main__":
-#     port = int(os.environ.get("PORT", 10000))
-#     app.run(host="0.0.0.0", port=port)
-
-
-
 from flask import Flask, jsonify
-import requests
 import os
+import requests
+import psycopg2
 import time
 from dotenv import load_dotenv
-import jira
 
 load_dotenv()
 
 app = Flask(__name__)
 
-CLIENT_ID = os.getenv("JIRA_CLIENT_ID")
-CLIENT_SECRET = os.getenv("JIRA_CLIENT_SECRET")
-
-REFRESH_TOKEN = jira.JIRA_REFRESH_TOKEN
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 TOKEN_URL = "https://auth.atlassian.com/oauth/token"
 
-ACCESS_TOKEN = None
-TOKEN_EXPIRY = 0
+
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def get_access_token():
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT refresh_token, access_token, expiry FROM jira_tokens WHERE id=1")
+    row = cur.fetchone()
+
+    if row:
+        refresh_token, access_token, expiry = row
+    else:
+        refresh_token = REFRESH_TOKEN
+        access_token = None
+        expiry = 0
+
+    current_time = int(time.time())
+
+    # return cached token if valid
+    if access_token and expiry and current_time < expiry:
+        cur.close()
+        conn.close()
+        return access_token
+
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "refresh_token": refresh_token
+    }
+
+    response = requests.post(TOKEN_URL, json=payload)
+    data = response.json()
+
+    if "access_token" not in data:
+        raise Exception("Token refresh failed")
+
+    new_access_token = data["access_token"]
+    new_refresh_token = data.get("refresh_token", refresh_token)
+
+    expiry_time = current_time + data["expires_in"]
+
+    cur.execute("""
+        INSERT INTO jira_tokens (id, refresh_token, access_token, expiry)
+        VALUES (1,%s,%s,%s)
+        ON CONFLICT (id)
+        DO UPDATE SET
+            refresh_token = EXCLUDED.refresh_token,
+            access_token = EXCLUDED.access_token,
+            expiry = EXCLUDED.expiry
+    """, (new_refresh_token, new_access_token, expiry_time))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return new_access_token
 
 
 @app.route("/")
@@ -94,61 +84,10 @@ def home():
     return "Jira Token API running"
 
 
-def update_refresh_token(new_token):
-    """
-    Update refresh token inside jira.py file
-    """
-    with open("jira.py", "w") as f:
-        f.write(f'JIRA_REFRESH_TOKEN = "{new_token}"\n')
-
-
 @app.route("/generate-token")
 def generate_token():
-
-    global ACCESS_TOKEN
-    global TOKEN_EXPIRY
-    global REFRESH_TOKEN
-
-    # return cached token if still valid
-    if ACCESS_TOKEN and time.time() < TOKEN_EXPIRY:
-        return jsonify({"access_token": ACCESS_TOKEN})
-
-    payload = {
-        "grant_type": "refresh_token",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "refresh_token": REFRESH_TOKEN
-    }
-
-    headers = {
-        "Content-Type": "application/json"
-    }
-
-    response = requests.post(TOKEN_URL, json=payload, headers=headers)
-
-    data = response.json()
-
-    if "access_token" not in data:
-        return jsonify({
-            "error": "Failed to generate token",
-            "response": data
-        })
-
-    ACCESS_TOKEN = data.get("access_token")
-
-    # get new refresh token from Atlassian
-    new_refresh_token = data.get("refresh_token")
-
-    if new_refresh_token:
-        REFRESH_TOKEN = new_refresh_token
-        update_refresh_token(new_refresh_token)
-
-    # token expiry (~1 hour)
-    TOKEN_EXPIRY = time.time() + 3500
-
-    return jsonify({
-        "access_token": ACCESS_TOKEN
-    })
+    token = get_access_token()
+    return jsonify({"access_token": token})
 
 
 if __name__ == "__main__":
