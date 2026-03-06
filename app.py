@@ -1,7 +1,8 @@
 from flask import Flask, jsonify
 import requests
 import os
-from dotenv import load_dotenv, set_key
+import time
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -12,20 +13,26 @@ CLIENT_SECRET = os.getenv("JIRA_CLIENT_SECRET")
 REFRESH_TOKEN = os.getenv("JIRA_REFRESH_TOKEN")
 
 TOKEN_URL = "https://auth.atlassian.com/oauth/token"
-ENV_FILE = ".env"
+
+ACCESS_TOKEN = None
+TOKEN_EXPIRY = 0
 
 
-# ---------------- HOME ROUTE ----------------
 @app.route("/")
 def home():
-    return "Jira Token API is running"
+    return "Jira Token API running"
 
 
-# ---------------- GENERATE TOKEN ----------------
 @app.route("/generate-token")
 def generate_token():
 
+    global ACCESS_TOKEN
+    global TOKEN_EXPIRY
     global REFRESH_TOKEN
+
+    # if token still valid return cached token
+    if ACCESS_TOKEN and time.time() < TOKEN_EXPIRY:
+        return jsonify({"access_token": ACCESS_TOKEN})
 
     payload = {
         "grant_type": "refresh_token",
@@ -42,19 +49,17 @@ def generate_token():
 
     data = response.json()
 
-    access_token = data.get("access_token")
-    new_refresh_token = data.get("refresh_token")
+    ACCESS_TOKEN = data.get("access_token")
+    REFRESH_TOKEN = data.get("refresh_token", REFRESH_TOKEN)
 
-    # Atlassian rotates refresh tokens
-    if new_refresh_token:
-        REFRESH_TOKEN = new_refresh_token
-        set_key(ENV_FILE, "JIRA_REFRESH_TOKEN", new_refresh_token)
+    # token expires in ~1 hour
+    TOKEN_EXPIRY = time.time() + 3500
 
     return jsonify({
-        "access_token": access_token
+        "access_token": ACCESS_TOKEN
     })
 
 
-# ---------------- RUN SERVER ----------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
