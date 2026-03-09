@@ -23,70 +23,74 @@ def get_db_connection():
 
 def get_access_token():
 
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = None
+    cur = None
 
-    cur.execute("SELECT refresh_token, access_token, expiry FROM jira_tokens WHERE id=1")
-    row = cur.fetchone()
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-    if row:
-        refresh_token, access_token, expiry = row
-    else:
-        refresh_token = REFRESH_TOKEN
-        access_token = None
-        expiry = 0
+        # get token from database
+        cur.execute("SELECT refresh_token, access_token, expiry FROM jira_tokens WHERE id=1")
+        row = cur.fetchone()
 
-    current_time = int(time.time())
+        if row:
+            refresh_token, access_token, expiry = row
+        else:
+            refresh_token = REFRESH_TOKEN
+            access_token = None
+            expiry = 0
 
-    # return cached token if still valid
-    if access_token and expiry and current_time < expiry:
-        cur.close()
-        conn.close()
-        return access_token
+        current_time = int(time.time())
 
-    payload = {
-        "grant_type": "refresh_token",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "refresh_token": refresh_token
-    }
+        # return cached token if still valid
+        if access_token and expiry and current_time < expiry:
+            return access_token
 
-    headers = {
-        "Content-Type": "application/json"
-    }
+        payload = {
+            "grant_type": "refresh_token",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "refresh_token": refresh_token
+        }
 
-    response = requests.post(TOKEN_URL, json=payload, headers=headers)
+        headers = {
+            "Content-Type": "application/json"
+        }
 
-    data = response.json()
+        response = requests.post(TOKEN_URL, json=payload, headers=headers)
+        data = response.json()
 
-    # DEBUG: show Atlassian response in logs
-    print("ATLASSIAN RESPONSE:", data)
+        print("ATLASSIAN RESPONSE:", data)
 
-    if "access_token" not in data:
-        cur.close()
-        conn.close()
-        raise Exception(f"Token refresh failed: {data}")
+        if "access_token" not in data:
+            raise Exception(f"Token refresh failed: {data}")
 
-    new_access_token = data["access_token"]
-    new_refresh_token = data.get("refresh_token", refresh_token)
+        new_access_token = data["access_token"]
+        new_refresh_token = data.get("refresh_token", refresh_token)
 
-    expiry_time = current_time + data.get("expires_in", 3600)
+        expiry_time = current_time + data.get("expires_in", 3600)
 
-    cur.execute("""
-        INSERT INTO jira_tokens (id, refresh_token, access_token, expiry)
-        VALUES (1,%s,%s,%s)
-        ON CONFLICT (id)
-        DO UPDATE SET
-            refresh_token = EXCLUDED.refresh_token,
-            access_token = EXCLUDED.access_token,
-            expiry = EXCLUDED.expiry
-    """, (new_refresh_token, new_access_token, expiry_time))
+        # store token in database
+        cur.execute("""
+            INSERT INTO jira_tokens (id, refresh_token, access_token, expiry)
+            VALUES (1,%s,%s,%s)
+            ON CONFLICT (id)
+            DO UPDATE SET
+                refresh_token = EXCLUDED.refresh_token,
+                access_token = EXCLUDED.access_token,
+                expiry = EXCLUDED.expiry
+        """, (new_refresh_token, new_access_token, expiry_time))
 
-    conn.commit()
-    cur.close()
-    conn.close()
+        conn.commit()
 
-    return new_access_token
+        return new_access_token
+
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 @app.route("/")
@@ -96,12 +100,12 @@ def home():
 
 @app.route("/generate-token")
 def generate_token():
-
     try:
         token = get_access_token()
         return jsonify({"access_token": token})
 
     except Exception as e:
+        print("TOKEN ERROR:", str(e))
         return jsonify({
             "error": str(e)
         }), 500
