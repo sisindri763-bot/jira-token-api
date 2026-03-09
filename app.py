@@ -38,7 +38,7 @@ def get_access_token():
 
     current_time = int(time.time())
 
-    # return cached token if valid
+    # return cached token if still valid
     if access_token and expiry and current_time < expiry:
         cur.close()
         conn.close()
@@ -51,16 +51,26 @@ def get_access_token():
         "refresh_token": refresh_token
     }
 
-    response = requests.post(TOKEN_URL, json=payload)
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(TOKEN_URL, json=payload, headers=headers)
+
     data = response.json()
 
+    # DEBUG: show Atlassian response in logs
+    print("ATLASSIAN RESPONSE:", data)
+
     if "access_token" not in data:
-        raise Exception("Token refresh failed")
+        cur.close()
+        conn.close()
+        raise Exception(f"Token refresh failed: {data}")
 
     new_access_token = data["access_token"]
     new_refresh_token = data.get("refresh_token", refresh_token)
 
-    expiry_time = current_time + data["expires_in"]
+    expiry_time = current_time + data.get("expires_in", 3600)
 
     cur.execute("""
         INSERT INTO jira_tokens (id, refresh_token, access_token, expiry)
@@ -86,8 +96,15 @@ def home():
 
 @app.route("/generate-token")
 def generate_token():
-    token = get_access_token()
-    return jsonify({"access_token": token})
+
+    try:
+        token = get_access_token()
+        return jsonify({"access_token": token})
+
+    except Exception as e:
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 
 if __name__ == "__main__":
